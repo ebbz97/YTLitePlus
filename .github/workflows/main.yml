@@ -1,0 +1,79 @@
+name: Build from Source
+
+on:
+  workflow_dispatch: {}  # Run by hand
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # (Optional) If the project uses submodules
+      - name: Sync submodules
+        run: git submodule update --init --recursive
+
+      # If the project uses CocoaPods (delete if not)
+      - name: Set up tools
+        run: |
+          gem install cocoapods --no-document || true
+          pod install || true
+
+      # ---- CODE SIGNING (add your own cert/profile as Secrets) ----
+      # If you have a .p12 cert (base64) and a provisioning profile (base64), import them:
+      - name: Import signing certs (optional but recommended)
+        if: ${{ secrets.IOS_CERT_P12 && secrets.IOS_CERT_PASSWORD && secrets.IOS_PROVISION }}
+        uses: apple-actions/import-codesign-certs@v2
+        with:
+          p12-file-base64: ${{ secrets.IOS_CERT_P12 }}
+          p12-password: ${{ secrets.IOS_CERT_PASSWORD }}
+          provisioning-profile-base64: ${{ secrets.IOS_PROVISION }}
+
+      # ---- BUILD ----
+      # Adjust workspace/scheme names to match the repo (see notes below).
+      - name: Build archive
+        run: |
+          set -e
+          xcodebuild -version
+          # Try workspace first; if the project is .xcodeproj, switch the flags below.
+          xcodebuild \
+            -workspace YTLitePlus.xcworkspace \
+            -scheme YTLitePlus \
+            -configuration Release \
+            -archivePath $PWD/build/App.xcarchive \
+            clean archive \
+            CODE_SIGNING_ALLOWED=YES
+
+      # Export IPA (needs an ExportOptions.plist suited to your signing)
+      - name: Export IPA
+        run: |
+          mkdir -p build/export
+          cat > ExportOptions.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>development</string>
+            <key>compileBitcode</key><false/>
+            <key>signingStyle</key><string>manual</string>
+            <key>stripSwiftSymbols</key><true/>
+            <key>uploadBitcode</key><false/>
+            <key>teamID</key><string>${TEAM_ID}</string>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath $PWD/build/App.xcarchive \
+            -exportOptionsPlist ExportOptions.plist \
+            -exportPath $PWD/build/export
+
+      # Upload to a GitHub Release
+      - name: Release IPA
+        uses: ncipollo/release-action@v1
+        with:
+          tag: v${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          artifacts: "build/export/*.ipa"
+          allowUpdates: true
